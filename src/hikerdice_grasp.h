@@ -20,6 +20,8 @@ void avaliar_melhor_solucao();
 void roll_dice(vertex* actualVertex, vertex *vertexPai);
 int fake_roll_dice(vertex* actualVertex, vertex *vertexPai);
 int relacaoPaiFilho(vertex* filho, vertex* pai);
+void generate_greedy_solutions();
+void reset_stack();
 
 
 

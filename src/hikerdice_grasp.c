@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <limits.h>
+#include <float.h>
 #include <time.h>
 #include "dice.h"
 #include "graph.h"
@@ -39,6 +40,11 @@ int pontuacao_parcial;//pontuacao parcial sendo construida
 int vertex_restantes;
 
 int *pontuacao_max_para_cada_numero_jogadas;
+
+//=============== parte do GRASP
+vertex*** solucoes_iniciais;//vetor para um vertex** (que por sua vez é um vetor de vertex*)
+int populacao_solucao_inicial;//tamanho da população inicial
+//================fim da parte do GRASP
 
 unsigned long long count_branches;
 unsigned long long qtd_solucoes_validas;
@@ -81,35 +87,71 @@ vertex **vertex_visitados_profundidade;
  *
  *
  * */
+
+/*
+ * 1ºpasso: Gerar N soluções guloso-aleatórias para posteriormente aplicar a busca local.
+ * 			nessas N soluções iniciais, as 17 primeiras serão:
+ * 			solução gulosa simples (sem aleatoriedade)
+ * 			 solução seguindo as seguintes ordens de preferência de vizinhos de um vértice, na árvore de busca
+ * 			 esq - cima - direita - baixo
+ * 			 esq - baixo - direita - cima
+ * 			 cima - direita - baixo - esq
+ * 			 cima - esq - baixo - direita
+ * 			 direita - baixo - esq - cima
+ * 			 direita - cima - esq - baixo
+ * 			 baixo - esq - cima - direita
+ * 			 baixo - direita - cima - esquerda
+ * 			 esq - dir - cima - baixo
+ * 			 esq - dir - baixo - cima
+ * 			 dir - esq - cima -baixo
+ * 			 dir - esq - baixo -cima
+ * 			 cima - baixo - esq - dir
+ * 			 cima - baixo - dir - esq
+ * 			 baixo - cima -esq- dir
+ * 			 baixo - cima - dir -esq
+ */
 void solve(){
-	add_childs(origin, stack);
-	solucao_parcial[-1] = origin;
+	generate_greedy_solutions();
 
-	while (head_stack >= 0){
-		vertex* actual = stack[head_stack];
-		if (!actual->visited){
-			actual->visited = true;
-			vertex_restantes--;
-			solucao_parcial[head_solucao_parcial++] = actual;
-			roll_dice(actual, solucao_parcial[head_solucao_parcial-2]);
-			add_childs(actual, stack);
-		}
-		else{
-			if (head_solucao_parcial == total_free_vertexes && pontuacao_melhor_solucao < pontuacao_parcial){
-				for (int i = 0; i < total_free_vertexes; i++){
-					melhor_solucao[i] = solucao_parcial[i];
-				}
-				pontuacao_melhor_solucao = pontuacao_parcial;
-				qtd_solucoes_validas++;
-				return;
+}
+
+//Gera N soluções semi-gulosas aleatórias
+//a cada vértice vizitado, os seus vizinhos livres são hankeados de acordo com a pontuação que se obtem
+//é feita uma roleta para decidir a ordem em que eles aparecerão para ser add na pilha
+void generate_greedy_solutions(){
+	for (int solution = 0; solution < populacao_solucao_inicial; solution++){
+		reset_stack();
+		add_childs(origin, stack);
+		solucao_parcial[-1] = origin;
+		bool has_found_solution = false;
+
+		while (head_stack >= 0 && !has_found_solution){
+			vertex* actual = stack[head_stack];
+			if (!actual->visited){
+				actual->visited = true;
+				vertex_restantes--;
+				solucao_parcial[head_solucao_parcial++] = actual;
+				roll_dice(actual, solucao_parcial[head_solucao_parcial-2]);
+				add_childs(actual, stack);
 			}
+			else{
+				if (head_solucao_parcial == total_free_vertexes && pontuacao_melhor_solucao < pontuacao_parcial){
+					for (int i = 0; i < total_free_vertexes; i++){
+						melhor_solucao[i] = solucao_parcial[i];
+					}
+					pontuacao_melhor_solucao = pontuacao_parcial;
+					qtd_solucoes_validas++;
+					has_found_solution = true;
+					continue;
+				}
 
-			//avaliar_melhor_solucao();
-			actual->visited = false;
-			pontuacao_parcial -= actual->d->bottom;
-			head_stack--;
-			head_solucao_parcial--;
-			vertex_restantes++;
+				//avaliar_melhor_solucao();
+				actual->visited = false;
+				pontuacao_parcial -= actual->d->bottom;
+				head_stack--;
+				head_solucao_parcial--;
+				vertex_restantes++;
+			}
 		}
 	}
 }
@@ -235,6 +277,10 @@ bool insert_conditions(vertex *atual, vertex *next, vertex *esq, vertex *cima, v
  *Esq, Cima, Dir, e baixo
  *Assim, a busca ocorre do sentido anti-horï¿½rio: baixo, dir, cima e esq.
  */
+
+/*Adiciona os filhos de 'atual', aplicando uma ordem gulosa que tenta escolher os mais bem aptos em cada sorteio.
+ * No fim, essa ordem é revertida, já que o ultimo adicionado será o primeiro da cabeça da pilha
+ */
 void add_childs(vertex* atual, vertex** stack){
 	int i = (*atual).i;
 	int j = (*atual).j;
@@ -247,7 +293,7 @@ void add_childs(vertex* atual, vertex** stack){
 	if (j<n_-1) vizinhoDir = &matrix[i][j+1];
 	if (i<m_-1) vizinhoBaixo = &matrix[i+1][j];
 
-	int start_pos = head_stack+1;
+	int first_new_vtx = head_stack+1;//guarda a posição do primeiro novo elemento inserid
 
 	if (insert_conditions(atual, vizinhoEsq, vizinhoEsq, vizinhoCima, vizinhoDir, vizinhoBaixo)){
 		stack[++head_stack] = vizinhoEsq;
@@ -266,23 +312,46 @@ void add_childs(vertex* atual, vertex** stack){
 		count_branches++;
 	}
 
-	if (start_pos > 0) {
-		for (int i = start_pos+1; i <= head_stack; i++){
-			stack[i]->tmp = fake_roll_dice(stack[i], stack[start_pos-1]);
+	//================================ Mecanismo de ordenação guloso-aleatório========================
+	int qtd_inseridos = head_stack - (first_new_vtx-1);
+	if (first_new_vtx > 0 && qtd_inseridos > 1){
+		float menor_valor_ponto = FLT_MAX;
+		float pontuacao[4] = {0};//pontuação do vtx i, de acordo com a ordem de leitura.
+		bool selecionados[4] = {0};
+		float acc_pontuacao = 0;//acumulador da pontuacao
+		vertex* subLista[4] = {0};
+		int count_selecionados = 0;
+
+		for (int i = first_new_vtx; i <= head_stack; i++){
+			pontuacao[i-first_new_vtx] = fake_roll_dice(stack[i], stack[first_new_vtx-1]);
+			if (pontuacao[i-first_new_vtx] < menor_valor_ponto)
+				menor_valor_ponto = pontuacao[i-first_new_vtx];//pegando o menor valor
+			acc_pontuacao += pontuacao[i-first_new_vtx];//pegando o acumulador
+		}
+		float diferenca = menor_valor_ponto - 1;//depois de calcular a diferença, dá pra subtrair as pontuações
+		acc_pontuacao -= diferenca*qtd_inseridos;
+		for (int i = first_new_vtx; i <= head_stack; i++){
+			pontuacao[i-first_new_vtx] -= diferenca;//subtrai todos os pontos pra aproximar de 0 e maximizar as diferenças
+			pontuacao[i-first_new_vtx] = pontuacao[i-first_new_vtx] / acc_pontuacao;//agora temos a % de cada vtx
+		}
+		while (count_selecionados < qtd_inseridos){
+			float sorteado = ((double)rand()/(double)RAND_MAX);
+			float acc_porcentagem = 0;//acumula as porcentagens para dar o 'pedaço da roleta'
+			for (int i = first_new_vtx; i <= head_stack && count_selecionados < qtd_inseridos; i++){
+				acc_porcentagem += pontuacao[i-first_new_vtx];
+				if (sorteado < acc_porcentagem && !selecionados[i-first_new_vtx]){
+					subLista[count_selecionados] = stack[i];
+					selecionados[i-first_new_vtx] = 1;
+					count_selecionados++;
+				}
+			}
 		}
 
-
-		for (int i = start_pos+1; i <= head_stack; i++){
-			vertex* key = stack[i];
-			int j = i-1;
-			while (j >= start_pos && key->tmp < stack[j]->tmp){
-				stack[j+1] = stack[j];
-				j--;
-			}
-			stack[j+1] = key;
+		//no fim, copia em ordem reversa pra pilha
+		for (int i = first_new_vtx; i <= head_stack; i++){
+			stack[i] = subLista[head_stack-i];
 		}
 	}
-
 }
 
 
@@ -354,16 +423,24 @@ int main(int argc, char *argv[]) {
 		if ( file == 0 ){
 			printf( "Impossivel abrir arquivo, encerrando\n" );
 			return EXIT_SUCCESS;
-		}else if (argc >= 4){
+		}else if (argc >= 5){
 			printf("Arquivo encontrado: ");
 			printf("%s",argv[1]);
 			printf("\n");
 			int dice_i_pos = argv[2][0] - 48;
 			int dice_j_pos = argv[3][0] - 48;
+			populacao_solucao_inicial = atoi(argv[4]);
+			//populacao_solucao_inicial = argv[4][0] - 48;
+
 			init_graph(file, dice_i_pos, dice_j_pos);
 		}
-
+		else {
+			printf("Argumentos Insuficientes, insira: nome do arquivo, posição xy do dado e o tamanho da pop inicial");
+			return EXIT_SUCCESS;
+		}
+		srand( (unsigned)time(NULL) );//preparando pra usar numeros aleatorios
 		init_data();
+		config_pontuacao_max();
 		if (total_free_vertexes % 2 != 0){
 			printf("O numero de casas livres eh impar. Nao existe solucao para o problema.");
 			return EXIT_SUCCESS;
@@ -405,6 +482,28 @@ void print_solution(float time_elapsed){
 	printf("\nQtd de retornos por grau de algum vizinho == 1: %llu\n", qtd_bound_grau_vizinho_1);
 }
 
+/*esvazia a pilha e outras variáveis para permitir o restart do GRASP*/
+void reset_stack(){
+	head_solucao_parcial = 0;
+	pontuacao_parcial = 0;
+	for(int i = 0; i < total_free_vertexes+1; i++){
+		solucao_parcial[i] = 0;
+	}
+	for(int i = 0; i < m_*n_*4; i++){
+		stack[i] = 0;
+	}
+	head_stack = -1;
+	vertex_restantes= total_free_vertexes;
+
+	for (int i = 0; i < m_; i++){
+		for (int j = 0; j < n_; j++){
+			matrix[i][j].visited = false;
+			matrix[i][j].d = new_dice(i,j);
+		}
+	}
+
+}
+
 void init_data(){
 	vertex** solucao_parcial_temp = (vertex**) malloc(sizeof(vertex*)*(total_free_vertexes+1));
 	solucao_parcial = &solucao_parcial_temp[1];//Permitindo que o índice -1 guarde o vértice de origem
@@ -430,8 +529,8 @@ void init_data(){
 	qtd_bound_null_black_visited = 0;
 	qtd_bound_grau_vizinho_1 = 0;
 
-	config_pontuacao_max();
-
+	//Parte do GRASP
+	solucoes_iniciais = (vertex***) malloc(sizeof(vertex**)*populacao_solucao_inicial);
 }
 
 /** Configura o array de pontuacao maxima para N jogadas*/
